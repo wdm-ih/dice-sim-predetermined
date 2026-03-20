@@ -25,12 +25,8 @@ const params = {
   wallFriction: 0.4,
   wallRestitution: 0.3,
 
-  // Settling blend
-  purePhysicsTime: 1.2,
-  blendDuration: 1.5,
-  blendStrengthMax: 0.15,
-  angularDampBlend: 0.05,
   sleepThreshold: 0.05,
+  textureDelay: 0.2,  // seconds before dynamic texture tracking begins
 };
 
 // ─── GUI ───────────────────────────────────────────────────
@@ -65,13 +61,8 @@ fPhysics.add(params, 'wallFriction', 0, 2, 0.05).name('Wall friction').onChange(
 fPhysics.add(params, 'wallRestitution', 0, 1, 0.05).name('Wall bounce').onChange(v => {
   diceWallCM.restitution = v;
 });
-
-const fSettle = gui.addFolder('Settling');
-fSettle.add(params, 'purePhysicsTime', 0.2, 4, 0.1).name('Pure physics (s)');
-fSettle.add(params, 'blendDuration', 0.5, 5, 0.1).name('Blend duration (s)');
-fSettle.add(params, 'blendStrengthMax', 0.01, 0.5, 0.01).name('Blend strength');
-fSettle.add(params, 'angularDampBlend', 0.01, 0.3, 0.01).name('Ang. damp blend');
-fSettle.add(params, 'sleepThreshold', 0.01, 0.5, 0.01).name('Sleep threshold');
+fPhysics.add(params, 'sleepThreshold', 0.01, 0.5, 0.01).name('Sleep threshold');
+fPhysics.add(params, 'textureDelay', 0, 3, 0.1).name('Texture delay (s)');
 
 // ─── Scene setup ───────────────────────────────────────────
 const scene = new THREE.Scene();
@@ -177,7 +168,7 @@ createWall(WALL_THICKNESS, WALL_HEIGHT, BOARD_H, new THREE.Vector3(BOARD_W / 2 +
 createWall(BOARD_W + WALL_THICKNESS * 2, WALL_HEIGHT, WALL_THICKNESS, new THREE.Vector3(0, WALL_HEIGHT / 2, -BOARD_H / 2 - WALL_THICKNESS / 2), wc);
 createWall(BOARD_W + WALL_THICKNESS * 2, WALL_HEIGHT, WALL_THICKNESS, new THREE.Vector3(0, WALL_HEIGHT / 2, BOARD_H / 2 + WALL_THICKNESS / 2), wc);
 
-// ─── Dice creation ─────────────────────────────────────────
+// ─── Dice textures ─────────────────────────────────────────
 const DICE_SIZE = 1.0;
 const DICE_HALF = DICE_SIZE / 2;
 
@@ -190,14 +181,22 @@ const pipLayouts = {
   6: [[-0.25, -0.25], [0.25, -0.25], [-0.25, 0], [0.25, 0], [-0.25, 0.25], [0.25, 0.25]],
 };
 
-const faceConfig = [
-  { value: 2, normal: [1, 0, 0] },
-  { value: 5, normal: [-1, 0, 0] },
-  { value: 3, normal: [0, 1, 0] },
-  { value: 4, normal: [0, -1, 0] },
-  { value: 1, normal: [0, 0, 1] },
-  { value: 6, normal: [0, 0, -1] },
+// Face indices in RoundedBoxGeometry material order: +X, -X, +Y, -Y, +Z, -Z
+// faceNormals[i] is the local-space normal for material slot i
+const faceNormals = [
+  new CANNON.Vec3(1, 0, 0),   // +X  slot 0
+  new CANNON.Vec3(-1, 0, 0),  // -X  slot 1
+  new CANNON.Vec3(0, 1, 0),   // +Y  slot 2
+  new CANNON.Vec3(0, -1, 0),  // -Y  slot 3
+  new CANNON.Vec3(0, 0, 1),   // +Z  slot 4
+  new CANNON.Vec3(0, 0, -1),  // -Z  slot 5
 ];
+
+// Pre-generate textures for values 1-6
+const diceTextures = {};
+for (let v = 1; v <= 6; v++) {
+  diceTextures[v] = createDiceTexture(v);
+}
 
 function createDiceTexture(value) {
   const size = 256;
@@ -221,10 +220,14 @@ function createDiceTexture(value) {
   return texture;
 }
 
+// ─── Dice creation ─────────────────────────────────────────
+// Default layout: standard die (opposite faces sum to 7)
+// Slots: +X=2, -X=5, +Y=3, -Y=4, +Z=1, -Z=6
+const defaultFaceValues = [2, 5, 3, 4, 1, 6];
+
 function createDiceMesh() {
-  const faceValues = [2, 5, 3, 4, 1, 6];
-  const materials = faceValues.map(v =>
-    new THREE.MeshStandardMaterial({ map: createDiceTexture(v), roughness: 0.4 })
+  const materials = defaultFaceValues.map(v =>
+    new THREE.MeshStandardMaterial({ map: diceTextures[v], roughness: 0.4 })
   );
   const geometry = new RoundedBoxGeometry(DICE_SIZE, DICE_SIZE, DICE_SIZE, 4, 0.08);
   const mesh = new THREE.Mesh(geometry, materials);
@@ -246,42 +249,67 @@ function createDiceBody() {
   return body;
 }
 
-// ─── Quaternion helpers ────────────────────────────────────
-function getQuaternionForTopFace(targetValue) {
-  const face = faceConfig.find(f => f.value === targetValue);
-  if (!face) return new CANNON.Quaternion();
-
-  const quat = new THREE.Quaternion();
-  quat.setFromUnitVectors(new THREE.Vector3(...face.normal), new THREE.Vector3(0, 1, 0));
-  return new CANNON.Quaternion(quat.x, quat.y, quat.z, quat.w);
-}
-
-function getTopFaceValue(body) {
+// ─── Detect which material slot faces up ───────────────────
+function getTopSlot(body) {
   const up = new CANNON.Vec3(0, 1, 0);
   let bestDot = -Infinity;
-  let bestValue = 1;
-  for (const face of faceConfig) {
-    const wn = body.quaternion.vmult(new CANNON.Vec3(...face.normal));
+  let bestSlot = 0;
+  for (let i = 0; i < 6; i++) {
+    const wn = body.quaternion.vmult(faceNormals[i]);
     const dot = wn.dot(up);
-    if (dot > bestDot) { bestDot = dot; bestValue = face.value; }
+    if (dot > bestDot) { bestDot = dot; bestSlot = i; }
   }
-  return bestValue;
+  return bestSlot;
 }
 
-function getNearestTargetQuat(body, targetValue) {
-  const baseQ = getQuaternionForTopFace(targetValue);
-  const curQ = new THREE.Quaternion(body.quaternion.x, body.quaternion.y, body.quaternion.z, body.quaternion.w);
+// Opposite slot pairs: 0<->1, 2<->3, 4<->5
+function oppositeSlot(slot) {
+  return slot % 2 === 0 ? slot + 1 : slot - 1;
+}
 
-  let bestQ = null;
-  let bestAngle = Infinity;
-  for (let i = 0; i < 4; i++) {
-    const yRot = new CANNON.Quaternion();
-    yRot.setFromEuler(0, (i * Math.PI) / 2, 0);
-    const candidate = baseQ.mult(yRot);
-    const angle = curQ.angleTo(new THREE.Quaternion(candidate.x, candidate.y, candidate.z, candidate.w));
-    if (angle < bestAngle) { bestAngle = angle; bestQ = candidate; }
+// ─── Remap textures so desired value shows on top ──────────
+// When dice settle, the top slot has some random value from physics.
+// We reassign ALL 6 face textures so that:
+//   - top slot shows the desired value
+//   - bottom slot shows (7 - desired) to maintain the real-die rule
+//   - the 4 side slots get the remaining 4 values, shuffled
+function remapDiceTextures(mesh, body, desiredTopValue) {
+  const topSlot = getTopSlot(body);
+  const bottomSlot = oppositeSlot(topSlot);
+  const bottomValue = 7 - desiredTopValue;
+
+  // Assign top and bottom
+  const materials = mesh.material;
+  materials[topSlot].map = diceTextures[desiredTopValue];
+  materials[topSlot].needsUpdate = true;
+  materials[bottomSlot].map = diceTextures[bottomValue];
+  materials[bottomSlot].needsUpdate = true;
+
+  // Remaining 4 values for the sides
+  const usedValues = new Set([desiredTopValue, bottomValue]);
+  const sideValues = [1, 2, 3, 4, 5, 6].filter(v => !usedValues.has(v));
+
+  // Shuffle side values for variety
+  for (let i = sideValues.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [sideValues[i], sideValues[j]] = [sideValues[j], sideValues[i]];
   }
-  return bestQ;
+
+  let sideIdx = 0;
+  for (let i = 0; i < 6; i++) {
+    if (i === topSlot || i === bottomSlot) continue;
+    materials[i].map = diceTextures[sideValues[sideIdx++]];
+    materials[i].needsUpdate = true;
+  }
+}
+
+// Reset dice to default texture layout (for next throw, while tumbling)
+function resetDiceTextures(mesh) {
+  const materials = mesh.material;
+  for (let i = 0; i < 6; i++) {
+    materials[i].map = diceTextures[defaultFaceValues[i]];
+    materials[i].needsUpdate = true;
+  }
 }
 
 // ─── Create two dice ───────────────────────────────────────
@@ -321,8 +349,12 @@ function throwDice() {
     d.mesh.visible = true;
     d.targetValue = targetValues[i];
     d.settled = false;
+    d.lastTopSlot = -1; // track which slot was last on top to avoid redundant remaps
 
-    // Apply current GUI params to body
+    // Reset textures to default for the initial throw
+    resetDiceTextures(d.mesh);
+
+    // Apply current GUI params
     d.body.mass = params.diceMass;
     d.body.updateMassProperties();
     d.body.linearDamping = params.linearDamping;
@@ -365,31 +397,25 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
 
   if (isAnimating) {
+    // Pure physics — zero manipulation
     world.step(1 / 120, dt, 8);
     simTime += dt;
 
-    // Gradual orientation blending after pure physics phase
-    if (simTime > params.purePhysicsTime) {
-      const progress = Math.min((simTime - params.purePhysicsTime) / params.blendDuration, 1);
-      const strength = progress * progress * progress; // ease-in cubic
-
+    // After delay, continuously track which face is on top and remap textures
+    // so the top face always shows the desired value — even mid-tumble
+    if (simTime > params.textureDelay) {
       dice.forEach(d => {
         if (d.settled) return;
-
-        const targetQ = getNearestTargetQuat(d.body, d.targetValue);
-        const curQ = d.body.quaternion.clone();
-        const blended = new CANNON.Quaternion();
-        CANNON.Quaternion.prototype.slerp.call(curQ, targetQ, strength * params.blendStrengthMax, blended);
-        d.body.quaternion.copy(blended);
-
-        // Extra angular damping during blend
-        const damp = 1 - strength * params.angularDampBlend;
-        d.body.angularVelocity.scale(damp, d.body.angularVelocity);
+        const topSlot = getTopSlot(d.body);
+        if (topSlot !== d.lastTopSlot) {
+          d.lastTopSlot = topSlot;
+          remapDiceTextures(d.mesh, d.body, d.targetValue);
+        }
       });
     }
 
-    // Check settled
-    if (simTime > params.purePhysicsTime + params.blendDuration * 0.5) {
+    // Check if dice have settled
+    if (simTime > 1.0) {
       const allSleeping = dice.every(d => {
         return d.body.velocity.length() < params.sleepThreshold
             && d.body.angularVelocity.length() < params.sleepThreshold;
@@ -398,9 +424,10 @@ function animate() {
       if (allSleeping) {
         dice.forEach(d => {
           if (!d.settled) {
-            d.body.quaternion.copy(getNearestTargetQuat(d.body, d.targetValue));
             d.body.velocity.setZero();
             d.body.angularVelocity.setZero();
+            // Final remap to be sure
+            remapDiceTextures(d.mesh, d.body, d.targetValue);
             d.settled = true;
           }
         });
@@ -408,7 +435,7 @@ function animate() {
         if (dice.every(d => d.settled)) {
           isAnimating = false;
           throwBtn.disabled = false;
-          statusEl.textContent = `Result: ${getTopFaceValue(dice[0].body)} and ${getTopFaceValue(dice[1].body)}`;
+          statusEl.textContent = `Result: ${dice[0].targetValue} and ${dice[1].targetValue}`;
         }
       }
     }
