@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dice Throw - Physics Simulation</title>
+  <link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+  <div id="ui">
+    <div class="dice-select">
+      <label>Dice 1</label>
+      <select id="dice1Val">
+        <option value="1">1</option><option value="2">2</option>
+        <option value="3" selected>3</option><option value="4">4</option>
+        <option value="5">5</option><option value="6">6</option>
+      </select>
+    </div>
+    <div class="dice-select">
+      <label>Dice 2</label>
+      <select id="dice2Val">
+        <option value="1">1</option><option value="2">2</option>
+        <option value="3">3</option><option value="4">4</option>
+        <option value="5">5</option><option value="6" selected>6</option>
+      </select>
+    </div>
+    <button id="throwBtn">Throw Dice</button>
+  </div>
+  <div id="status">Select values and throw!</div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
