@@ -3,9 +3,40 @@ import GUI from 'lil-gui';
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 
+// ─── Types ─────────────────────────────────────────────────
+type DiceValue = 1 | 2 | 3 | 4 | 5 | 6;
+
+interface DiceState {
+  mesh: THREE.Mesh<RoundedBoxGeometry, THREE.MeshStandardMaterial[]>;
+  body: CANNON.Body;
+  targetValue: DiceValue;
+  settled: boolean;
+  lastTopSlot: number;
+}
+
+interface Params {
+  throwSpeed: number;
+  throwSpeedRandom: number;
+  throwHeight: number;
+  throwUpward: number;
+  throwZSpread: number;
+  spinX: number;
+  spinY: number;
+  spinZ: number;
+  gravity: number;
+  diceMass: number;
+  linearDamping: number;
+  angularDamping: number;
+  floorFriction: number;
+  floorRestitution: number;
+  wallFriction: number;
+  wallRestitution: number;
+  sleepThreshold: number;
+  textureDelay: number;
+}
+
 // ─── Tunable params ────────────────────────────────────────
-const params = {
-  // Throw
+const params: Params = {
   throwSpeed: 65,
   throwSpeedRandom: 8,
   throwHeight: 3,
@@ -15,7 +46,6 @@ const params = {
   spinY: 10,
   spinZ: 15,
 
-  // Physics
   gravity: -40,
   diceMass: 0.3,
   linearDamping: 0.25,
@@ -26,7 +56,7 @@ const params = {
   wallRestitution: 0.3,
 
   sleepThreshold: 0.05,
-  textureDelay: 0.2,  // seconds before dynamic texture tracking begins
+  textureDelay: 0.2,
 };
 
 // ─── GUI ───────────────────────────────────────────────────
@@ -43,22 +73,22 @@ fThrow.add(params, 'spinY', 0, 40, 1).name('Spin Y');
 fThrow.add(params, 'spinZ', 0, 40, 1).name('Spin Z');
 
 const fPhysics = gui.addFolder('Physics');
-fPhysics.add(params, 'gravity', -100, -5, 1).name('Gravity').onChange(v => {
+fPhysics.add(params, 'gravity', -100, -5, 1).name('Gravity').onChange((v: number) => {
   world.gravity.set(0, v, 0);
 });
 fPhysics.add(params, 'diceMass', 0.05, 5, 0.05).name('Dice mass');
 fPhysics.add(params, 'linearDamping', 0, 0.99, 0.01).name('Linear damp');
 fPhysics.add(params, 'angularDamping', 0, 0.99, 0.01).name('Angular damp');
-fPhysics.add(params, 'floorFriction', 0, 2, 0.05).name('Floor friction').onChange(v => {
+fPhysics.add(params, 'floorFriction', 0, 2, 0.05).name('Floor friction').onChange((v: number) => {
   diceFloorCM.friction = v;
 });
-fPhysics.add(params, 'floorRestitution', 0, 1, 0.05).name('Floor bounce').onChange(v => {
+fPhysics.add(params, 'floorRestitution', 0, 1, 0.05).name('Floor bounce').onChange((v: number) => {
   diceFloorCM.restitution = v;
 });
-fPhysics.add(params, 'wallFriction', 0, 2, 0.05).name('Wall friction').onChange(v => {
+fPhysics.add(params, 'wallFriction', 0, 2, 0.05).name('Wall friction').onChange((v: number) => {
   diceWallCM.friction = v;
 });
-fPhysics.add(params, 'wallRestitution', 0, 1, 0.05).name('Wall bounce').onChange(v => {
+fPhysics.add(params, 'wallRestitution', 0, 1, 0.05).name('Wall bounce').onChange((v: number) => {
   diceWallCM.restitution = v;
 });
 fPhysics.add(params, 'sleepThreshold', 0.01, 0.5, 0.01).name('Sleep threshold');
@@ -144,7 +174,10 @@ floorBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
 world.addBody(floorBody);
 
 // ─── Walls ─────────────────────────────────────────────────
-function createWall(width, height, depth, position, color) {
+function createWall(
+  width: number, height: number, depth: number,
+  position: THREE.Vector3, color: number
+): void {
   const mesh = new THREE.Mesh(
     new THREE.BoxGeometry(width, height, depth),
     new THREE.MeshStandardMaterial({ color, roughness: 0.7, metalness: 0.1 })
@@ -158,7 +191,7 @@ function createWall(width, height, depth, position, color) {
     mass: 0, material: wallPhysMat,
     shape: new CANNON.Box(new CANNON.Vec3(width / 2, height / 2, depth / 2)),
   });
-  body.position.copy(position);
+  body.position.set(position.x, position.y, position.z);
   world.addBody(body);
 }
 
@@ -172,7 +205,7 @@ createWall(BOARD_W + WALL_THICKNESS * 2, WALL_HEIGHT, WALL_THICKNESS, new THREE.
 const DICE_SIZE = 1.0;
 const DICE_HALF = DICE_SIZE / 2;
 
-const pipLayouts = {
+const pipLayouts: Record<DiceValue, [number, number][]> = {
   1: [[0, 0]],
   2: [[-0.25, -0.25], [0.25, 0.25]],
   3: [[-0.25, -0.25], [0, 0], [0.25, 0.25]],
@@ -181,9 +214,7 @@ const pipLayouts = {
   6: [[-0.25, -0.25], [0.25, -0.25], [-0.25, 0], [0.25, 0], [-0.25, 0.25], [0.25, 0.25]],
 };
 
-// Face indices in RoundedBoxGeometry material order: +X, -X, +Y, -Y, +Z, -Z
-// faceNormals[i] is the local-space normal for material slot i
-const faceNormals = [
+const faceNormals: CANNON.Vec3[] = [
   new CANNON.Vec3(1, 0, 0),   // +X  slot 0
   new CANNON.Vec3(-1, 0, 0),  // -X  slot 1
   new CANNON.Vec3(0, 1, 0),   // +Y  slot 2
@@ -192,18 +223,12 @@ const faceNormals = [
   new CANNON.Vec3(0, 0, -1),  // -Z  slot 5
 ];
 
-// Pre-generate textures for values 1-6
-const diceTextures = {};
-for (let v = 1; v <= 6; v++) {
-  diceTextures[v] = createDiceTexture(v);
-}
-
-function createDiceTexture(value) {
+function createDiceTexture(value: DiceValue): THREE.CanvasTexture {
   const size = 256;
   const canvas = document.createElement('canvas');
   canvas.width = size;
   canvas.height = size;
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d')!;
 
   ctx.fillStyle = '#f5f5f0';
   ctx.fillRect(0, 0, size, size);
@@ -220,12 +245,16 @@ function createDiceTexture(value) {
   return texture;
 }
 
-// ─── Dice creation ─────────────────────────────────────────
-// Default layout: standard die (opposite faces sum to 7)
-// Slots: +X=2, -X=5, +Y=3, -Y=4, +Z=1, -Z=6
-const defaultFaceValues = [2, 5, 3, 4, 1, 6];
+// Pre-generate textures for values 1-6
+const diceTextures: Record<DiceValue, THREE.CanvasTexture> = {} as Record<DiceValue, THREE.CanvasTexture>;
+for (let v = 1; v <= 6; v++) {
+  diceTextures[v as DiceValue] = createDiceTexture(v as DiceValue);
+}
 
-function createDiceMesh() {
+// ─── Dice creation ─────────────────────────────────────────
+const defaultFaceValues: DiceValue[] = [2, 5, 3, 4, 1, 6];
+
+function createDiceMesh(): THREE.Mesh<RoundedBoxGeometry, THREE.MeshStandardMaterial[]> {
   const materials = defaultFaceValues.map(v =>
     new THREE.MeshStandardMaterial({ map: diceTextures[v], roughness: 0.4 })
   );
@@ -237,7 +266,7 @@ function createDiceMesh() {
   return mesh;
 }
 
-function createDiceBody() {
+function createDiceBody(): CANNON.Body {
   const body = new CANNON.Body({
     mass: params.diceMass,
     material: dicePhysMat,
@@ -250,7 +279,7 @@ function createDiceBody() {
 }
 
 // ─── Detect which material slot faces up ───────────────────
-function getTopSlot(body) {
+function getTopSlot(body: CANNON.Body): number {
   const up = new CANNON.Vec3(0, 1, 0);
   let bestDot = -Infinity;
   let bestSlot = 0;
@@ -262,34 +291,29 @@ function getTopSlot(body) {
   return bestSlot;
 }
 
-// Opposite slot pairs: 0<->1, 2<->3, 4<->5
-function oppositeSlot(slot) {
+function oppositeSlot(slot: number): number {
   return slot % 2 === 0 ? slot + 1 : slot - 1;
 }
 
 // ─── Remap textures so desired value shows on top ──────────
-// When dice settle, the top slot has some random value from physics.
-// We reassign ALL 6 face textures so that:
-//   - top slot shows the desired value
-//   - bottom slot shows (7 - desired) to maintain the real-die rule
-//   - the 4 side slots get the remaining 4 values, shuffled
-function remapDiceTextures(mesh, body, desiredTopValue) {
+function remapDiceTextures(
+  mesh: THREE.Mesh<RoundedBoxGeometry, THREE.MeshStandardMaterial[]>,
+  body: CANNON.Body,
+  desiredTopValue: DiceValue
+): void {
   const topSlot = getTopSlot(body);
   const bottomSlot = oppositeSlot(topSlot);
-  const bottomValue = 7 - desiredTopValue;
+  const bottomValue = (7 - desiredTopValue) as DiceValue;
 
-  // Assign top and bottom
   const materials = mesh.material;
   materials[topSlot].map = diceTextures[desiredTopValue];
   materials[topSlot].needsUpdate = true;
   materials[bottomSlot].map = diceTextures[bottomValue];
   materials[bottomSlot].needsUpdate = true;
 
-  // Remaining 4 values for the sides
-  const usedValues = new Set([desiredTopValue, bottomValue]);
-  const sideValues = [1, 2, 3, 4, 5, 6].filter(v => !usedValues.has(v));
+  const usedValues = new Set<DiceValue>([desiredTopValue, bottomValue]);
+  const sideValues = ([1, 2, 3, 4, 5, 6] as DiceValue[]).filter(v => !usedValues.has(v));
 
-  // Shuffle side values for variety
   for (let i = sideValues.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [sideValues[i], sideValues[j]] = [sideValues[j], sideValues[i]];
@@ -303,8 +327,9 @@ function remapDiceTextures(mesh, body, desiredTopValue) {
   }
 }
 
-// Reset dice to default texture layout (for next throw, while tumbling)
-function resetDiceTextures(mesh) {
+function resetDiceTextures(
+  mesh: THREE.Mesh<RoundedBoxGeometry, THREE.MeshStandardMaterial[]>
+): void {
   const materials = mesh.material;
   for (let i = 0; i < 6; i++) {
     materials[i].map = diceTextures[defaultFaceValues[i]];
@@ -313,9 +338,9 @@ function resetDiceTextures(mesh) {
 }
 
 // ─── Create two dice ───────────────────────────────────────
-const dice = [
-  { mesh: createDiceMesh(), body: createDiceBody() },
-  { mesh: createDiceMesh(), body: createDiceBody() },
+const dice: DiceState[] = [
+  { mesh: createDiceMesh(), body: createDiceBody(), targetValue: 3, settled: false, lastTopSlot: -1 },
+  { mesh: createDiceMesh(), body: createDiceBody(), targetValue: 6, settled: false, lastTopSlot: -1 },
 ];
 
 dice.forEach(d => {
@@ -327,19 +352,19 @@ dice.forEach(d => {
 let isAnimating = false;
 let simTime = 0;
 
-const throwBtn = document.getElementById('throwBtn');
-const statusEl = document.getElementById('status');
+const throwBtn = document.getElementById('throwBtn') as HTMLButtonElement;
+const statusEl = document.getElementById('status') as HTMLDivElement;
 
-function throwDice() {
+function throwDice(): void {
   if (isAnimating) return;
   isAnimating = true;
   throwBtn.disabled = true;
   statusEl.textContent = 'Throwing...';
   simTime = 0;
 
-  const targetValues = [
-    parseInt(document.getElementById('dice1Val').value),
-    parseInt(document.getElementById('dice2Val').value),
+  const targetValues: DiceValue[] = [
+    parseInt((document.getElementById('dice1Val') as HTMLSelectElement).value) as DiceValue,
+    parseInt((document.getElementById('dice2Val') as HTMLSelectElement).value) as DiceValue,
   ];
 
   const startX = BOARD_W / 2 - 1.5;
@@ -349,12 +374,10 @@ function throwDice() {
     d.mesh.visible = true;
     d.targetValue = targetValues[i];
     d.settled = false;
-    d.lastTopSlot = -1; // track which slot was last on top to avoid redundant remaps
+    d.lastTopSlot = -1;
 
-    // Reset textures to default for the initial throw
     resetDiceTextures(d.mesh);
 
-    // Apply current GUI params
     d.body.mass = params.diceMass;
     d.body.updateMassProperties();
     d.body.linearDamping = params.linearDamping;
@@ -366,19 +389,16 @@ function throwDice() {
     d.body.force.setZero();
     d.body.torque.setZero();
 
-    d.body.position.set(startX, startY, (i === 0) ? -0.8 : 0.8);
+    d.body.position.set(startX, startY, i === 0 ? -0.8 : 0.8);
 
-    // Random orientation
     const rq = new CANNON.Quaternion();
     rq.setFromEuler(Math.random() * Math.PI * 2, Math.random() * Math.PI * 2, Math.random() * Math.PI * 2);
     d.body.quaternion.copy(rq);
 
-    // Throw: strong leftward
     const vx = -(params.throwSpeed + Math.random() * params.throwSpeedRandom);
     const vz = (Math.random() - 0.5) * params.throwZSpread;
     d.body.velocity.set(vx, params.throwUpward, vz);
 
-    // Tumbling spin
     d.body.angularVelocity.set(
       (Math.random() - 0.5) * params.spinX,
       (Math.random() - 0.5) * params.spinY,
@@ -390,19 +410,17 @@ function throwDice() {
 throwBtn.addEventListener('click', throwDice);
 
 // ─── Animation loop ────────────────────────────────────────
-const clock = new THREE.Clock();
+const timer = new THREE.Timer();
 
-function animate() {
+function animate(): void {
   requestAnimationFrame(animate);
-  const dt = Math.min(clock.getDelta(), 0.05);
+  timer.update();
+  const dt = Math.min(timer.getDelta(), 0.05);
 
   if (isAnimating) {
-    // Pure physics — zero manipulation
     world.step(1 / 120, dt, 8);
     simTime += dt;
 
-    // After delay, continuously track which face is on top and remap textures
-    // so the top face always shows the desired value — even mid-tumble
     if (simTime > params.textureDelay) {
       dice.forEach(d => {
         if (d.settled) return;
@@ -414,19 +432,17 @@ function animate() {
       });
     }
 
-    // Check if dice have settled
     if (simTime > 1.0) {
-      const allSleeping = dice.every(d => {
-        return d.body.velocity.length() < params.sleepThreshold
-            && d.body.angularVelocity.length() < params.sleepThreshold;
-      });
+      const allSleeping = dice.every(d =>
+        d.body.velocity.length() < params.sleepThreshold
+        && d.body.angularVelocity.length() < params.sleepThreshold
+      );
 
       if (allSleeping) {
         dice.forEach(d => {
           if (!d.settled) {
             d.body.velocity.setZero();
             d.body.angularVelocity.setZero();
-            // Final remap to be sure
             remapDiceTextures(d.mesh, d.body, d.targetValue);
             d.settled = true;
           }
@@ -462,6 +478,6 @@ window.addEventListener('resize', () => {
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-document.addEventListener('keydown', (e) => {
+document.addEventListener('keydown', (e: KeyboardEvent) => {
   if (e.code === 'Space') { e.preventDefault(); throwDice(); }
 });
